@@ -1,114 +1,159 @@
-const express = require('express')
-const router = express.Router()
-const sql_pool = require('./src/mysql')
-const upload = require('./src/aws_multer').upload
-const download = require('./src/aws_multer').download
+const express = require("express");
+const router = express.Router();
+const supabase = require("./src/supabase");
+const { upload, uploadToSupabase } = require("./src/supabase_multer");
 
-router.post('/get_contents', (req, res) => {
-    const id = req.body.id
-    const count = req.body.count
+/**
+ * 콘텐츠 관련 API
+ * Supabase 기반
+ */
 
-    const sql = 'SELECT * FROM content order by content_id desc limit ?, ?'
-    sql_pool.query(sql, [id, count], (err, result) => {
-        if (err)
-            throw err
-        else
-            res.send(result)
-    })
-})
+// 모든 콘텐츠 조회 (페이지네이션)
+router.post("/get_contents", async (req, res) => {
+  try {
+    const offset = req.body.id || 0;
+    const limit = req.body.count || 20;
 
-router.post('/get_content', (req, res) => {
-    const id = req.body.content_id
+    const { data, error } = await supabase
+      .from("content")
+      .select("*")
+      .order("content_id", { ascending: false })
+      .range(offset, offset + limit - 1);
 
-    const sql = 'SELECT * FROM content where content_id = ?'
-    sql_pool.query(sql, [id], (err, result) => {
-        if (err)
-            throw err
-        else
-            res.send(result)
-    })
-})
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    console.error("Get contents error:", error);
+    res.status(500).json({ error: "Failed to get contents" });
+  }
+});
 
-router.post('/get_usercontent', (req, res) => {
-    const id = req.body.id
-    const sql_getcontent = `SELECT * FROM content WHERE user_id = ?`
-    sql_pool.query(sql_getcontent, [id], (err_get, rows_get, result_get) => {
-        if (err_get)
-            console.log(err_get)
-        else
-            res.send(rows_get)
-    })
-})
+// 특정 콘텐츠 조회
+router.post("/get_content", async (req, res) => {
+  try {
+    const content_id = req.body.content_id;
 
-router.post('/insert_content', upload.single('img'), (req, res) => {
-    const id = req.session.sign
-    const message = req.body.message
-    const filename = req.filedirectory
+    const { data, error } = await supabase
+      .from("content")
+      .select("*")
+      .eq("content_id", content_id);
 
-    const sql = 'insert into content(user_id, message, filename) values (?, ?, ?)'
-    sql_pool.query(sql, [id, message, filename], (err, result) => {
-        if (err)
-            throw err
-        else
-            res.send("success")
-    })
-})
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    console.error("Get content error:", error);
+    res.status(500).json({ error: "Failed to get content" });
+  }
+});
 
-router.post('/search', (req, res) => {
-    const sql = 'SELECT * FROM content where message LIKE' + " '%" + req.body.searchbox + "%' "
+// 사용자 콘텐츠 조회
+router.post("/get_usercontent", async (req, res) => {
+  try {
+    const user_id = req.body.id;
 
-    sql_pool.query(sql, (err, result) => {
-        if (err)
-            throw err
-        else
-            res.send(result)
-    })
-})
+    const { data, error } = await supabase
+      .from("content")
+      .select("*")
+      .eq("id", user_id)
+      .order("content_id", { ascending: false });
 
-router.post('/content_delete', (req, res) => {
-    const content_id = req.body.content_id
-    const sql = 'DELETE FROM content WHERE content_id = ?'
-    sql_pool.query(sql, [content_id], (err, result) => {
-        if (err)
-            throw err
-        else
-            res.send("success")
-    })
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    console.error("Get user content error:", error);
+    res.status(500).json({ error: "Failed to get user content" });
+  }
+});
 
-    // s3.deleteObject({
-    //     Bucket: 'webservicegraduationproject',
-    //     Key: 'img/' + content_id + '.png'
-    // }, (err, data) => {
-    //     if (err) { throw err; }
-    // });
-})
+// 콘텐츠 업로드
+router.post("/insert_content", upload.single("img"), async (req, res) => {
+  try {
+    const user_id = req.session.sign;
+    const message = req.body.message;
 
-router.post('/content_update', (req, res) => {
-    const content_id = req.body.content_id
-    const content_message = req.body.content_message
-    const sql = 'UPDATE content SET message = ? WHERE content_id = ?'
-    sql_pool.query(sql, [content_message, content_id], (err, result) => {
-        if (err)
-            throw err
-        else
-            res.send("success")
-    })
-
-    if (req.body.image != null) {
-        s3.deleteObject({
-            Bucket: 'webservicegraduationproject',
-            Key: 'img/' + content_id + '.png'
-        }, (err, data) => {
-            if (err) { throw err; }
-        });
-
-        upload.single('img')
+    if (!req.file) {
+      return res.status(400).json({ error: "No file provided" });
     }
-})
 
-router.get('/download/:key', (req, res) => { 
-    const key = req.params.key
-    download(req, res, key);
-})
+    // Supabase Storage에 파일 업로드
+    const filename = await uploadToSupabase(req.file.buffer, "img");
 
-module.exports = router
+    // 콘텐츠 테이블에 레코드 삽입
+    const { error } = await supabase.from("content").insert([
+      {
+        id: user_id,
+        filename: filename,
+        hashtag: message, // hashtag 필드에 메시지 저장
+      },
+    ]);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Insert content error:", error);
+    res.status(500).json({ error: "Failed to insert content" });
+  }
+});
+
+// 검색
+router.post("/search", async (req, res) => {
+  try {
+    const searchbox = req.body.searchbox || "";
+
+    const { data, error } = await supabase
+      .from("content")
+      .select("*")
+      .ilike("hashtag", `%${searchbox}%`)
+      .order("content_id", { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    console.error("Search error:", error);
+    res.status(500).json({ error: "Search failed" });
+  }
+});
+
+// 콘텐츠 삭제
+router.post("/content_delete", async (req, res) => {
+  try {
+    const content_id = req.body.content_id;
+
+    const { error } = await supabase
+      .from("content")
+      .delete()
+      .eq("content_id", content_id);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Delete content error:", error);
+    res.status(500).json({ error: "Failed to delete content" });
+  }
+});
+
+// 콘텐츠 업데이트
+router.post("/content_update", async (req, res) => {
+  try {
+    const content_id = req.body.content_id;
+    const content_message = req.body.content_message;
+
+    const { error } = await supabase
+      .from("content")
+      .update({ hashtag: content_message })
+      .eq("content_id", content_id);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Update content error:", error);
+    res.status(500).json({ error: "Failed to update content" });
+  }
+});
+
+router.get("/download/:key", (req, res) => {
+  const key = req.params.key;
+  download(req, res, key);
+});
+
+module.exports = router;

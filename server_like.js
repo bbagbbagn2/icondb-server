@@ -1,64 +1,95 @@
-const express = require('express')
-const router = express.Router()
-const sql_pool = require('./src/mysql')
+const express = require("express");
+const router = express.Router();
+const supabase = require("./src/supabase");
 
-router.post('/check_liked', (req, res) => {
-    const content_id = req.body.content_id
-    const id = req.session.sign
+/**
+ * 좋아요 관련 API
+ * Supabase 기반
+ */
 
-    const sql_likecheck = 'SELECT * FROM likefunction WHERE id = ? AND content_idx = ?'
-    sql_pool.query(sql_likecheck, [id, content_id], (err_likecheck, result_likecheck) => {
-        if (result_likecheck.length > 0)
-            res.send('liked')
-        else
-            res.send('unliked')
-    })
-})
+// 좋아요 여부 확인
+router.post("/check_liked", async (req, res) => {
+  try {
+    const content_id = req.body.content_id;
+    const user_id = req.session.sign;
 
-router.post('/setLike', (req, res) => {
-    const content_id = req.body.content_id
-    const id = req.session.sign
+    const { data, error } = await supabase
+      .from("likes")
+      .select("*")
+      .eq("user_id", user_id)
+      .eq("content_id", content_id);
 
-    const sql_likecheck = 'SELECT * FROM likefunction WHERE id = ? AND content_idx = ?'
-    sql_pool.query(sql_likecheck, [id, content_id], (err_likecheck, result_likecheck) => {
-        let sql_liketableupdate
-        let sql_likeupdate = `UPDATE content SET content.like = content.like-1 WHERE content_id = ?`
-        let like = result_likecheck.length > 0
+    if (error) throw error;
+    res.json(data && data.length > 0 ? "liked" : "unliked");
+  } catch (error) {
+    console.error("Check liked error:", error);
+    res.json("unliked");
+  }
+});
 
-        if (like) {
-            sql_likeupdate = `UPDATE content SET content.like = content.like-1 WHERE content_id = ?`
-            sql_liketableupdate = 'DELETE FROM likefunction WHERE id = ? AND content_idx = ?'
-        }
-        else {
-            sql_likeupdate = `UPDATE content SET content.like = content.like+1 WHERE content_id = ?`
-            sql_liketableupdate = 'INSERT INTO likefunction(id, content_idx) VALUES (?,?)'
-        }
+// 좋아요 토글
+router.post("/setLike", async (req, res) => {
+  try {
+    const content_id = req.body.content_id;
+    const user_id = req.session.sign;
 
-        sql_pool.query(sql_likeupdate, [content_id], (err_likeupdate, result_likeupdate) => {
-            if (err_likeupdate)
-                console.log(err_likeupdate)
-            else {
-                sql_pool.query(sql_liketableupdate, [id, content_id], (err_liketableupdate, result_liketableupdate) => {
-                    if (err_liketableupdate)
-                        console.log(err_liketableupdate)
-                    else
-                        res.send(!like)
-                })
-            }
-        })
-    })
-})
+    // 이미 좋아요한 상태인지 확인
+    const { data: existingLike, error: checkError } = await supabase
+      .from("likes")
+      .select("*")
+      .eq("user_id", user_id)
+      .eq("content_id", content_id);
 
-router.post('/get_userlike', (req, res) => {
-    const id = req.body.id
-    const sql_getlike = `SELECT content.* FROM likefunction INNER JOIN content ON 
-    content.content_id = likefunction.content_idx WHERE likefunction.id = ?`
-    sql_pool.query(sql_getlike, [id], (err_get, rows_get, result_get) => {
-        if (err_get)
-            console.log(err_get)
-        else
-            res.send(rows_get)
-    })
-})
+    if (checkError) throw checkError;
 
-module.exports = router
+    const isLiked = existingLike && existingLike.length > 0;
+
+    if (isLiked) {
+      // 좋아요 제거
+      const { error: deleteError } = await supabase
+        .from("likes")
+        .delete()
+        .eq("user_id", user_id)
+        .eq("content_id", content_id);
+
+      if (deleteError) throw deleteError;
+      res.json(false);
+    } else {
+      // 좋아요 추가
+      const { error: insertError } = await supabase
+        .from("likes")
+        .insert([{ user_id, content_id }]);
+
+      if (insertError) throw insertError;
+      res.json(true);
+    }
+  } catch (error) {
+    console.error("Set like error:", error);
+    res.status(500).json({ error: "Failed to toggle like" });
+  }
+});
+
+// 사용자가 좋아요한 콘텐츠 조회
+router.post("/get_userlikedcontent", async (req, res) => {
+  try {
+    const user_id = req.body.id;
+
+    const { data, error } = await supabase
+      .from("likes")
+      .select("content(*)")
+      .eq("user_id", user_id);
+
+    if (error) throw error;
+
+    // content 객체 추출
+    const contents = data
+      ? data.map((item) => item.content).filter(Boolean)
+      : [];
+    res.json(contents);
+  } catch (error) {
+    console.error("Get user liked content error:", error);
+    res.status(500).json({ error: "Failed to get liked content" });
+  }
+});
+
+module.exports = router;

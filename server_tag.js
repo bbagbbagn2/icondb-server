@@ -1,56 +1,106 @@
-const express = require('express')
-const router = express.Router()
-const sql_pool = require('./src/mysql')
+const express = require("express");
+const router = express.Router();
+const supabase = require("./src/supabase");
 
-router.post('/tag_insert', (req, res) => {
-    const content_id = req.body.content_id
-    const tag_context = req.body.tag_context
+/**
+ * 태그 관련 API
+ * Supabase 기반
+ * content.hashtag 필드에 태그 저장
+ */
 
-    const sql_InsertHash = "INSERT INTO Hash(Hashtag) VALUES ('" + tag_context + "')"
-    sql_pool.query(sql_InsertHash, (err_InsertHash, result_InsertHash) => {
-        const sql_Hashtag = 'SELECT * FROM Hash WHERE Hashtag = ?'
-        sql_pool.query(sql_Hashtag, [tag_context], (err_Hash, rows_Hash, result_Hash) => {
-            const Hash_idx = rows_Hash[0].Hash_id
-            const sql_content_tag = 'INSERT INTO content_has_hash(content_idx, Hash_idx) VALUES (?,?)'
-            sql_pool.query(sql_content_tag, [content_id, Hash_idx], (err_content_tag, result_content_tag) => {
-                if (err_content_tag)
-                    res.send("duplication")
-                else
-                    res.send(result_content_tag)
-            })
-        })
-    })
-})
+// 태그 추가
+router.post("/tag_insert", async (req, res) => {
+  try {
+    const content_id = req.body.content_id;
+    const tag_context = req.body.tag_context;
 
-router.post('/tag_search', (req, res) => {
-    const search_tag = req.body.Hashtag
-    const sql_Hashtag = 'SELECT Hash_id FROM Hash WHERE Hashtag = ?'
-    sql_pool.query(sql_Hashtag, [search_tag], (err_tag, rows_tag, result_tag) => {
-        if (err_tag)
-            console.log(err_tag)
-        else {
-            const sql_getcontent = `SELECT content.* FROM content_has_hash INNER JOIN content ON 
-            content_has_hash.content_idx = content.content_id WHERE content_has_hash.Hash_idx = ?`
-            sql_pool.query(sql_getcontent, [rows_tag[0].Hash_id], (err_get, rows_get, result_get) => {
-                if (err_get)
-                    console.log(err_get)
-                else
-                    res.send(rows_get)
-            })
-        }
-    })
-})
+    if (!tag_context) {
+      return res.json("fail");
+    }
 
-router.post('/get_tags', (req, res) => {
-    const content_id = req.body.content_id
-    const sql_gettag = `SELECT Hash.Hashtag FROM content_has_hash INNER JOIN Hash ON 
-content_has_hash.Hash_idx = Hash.Hash_id WHERE content_has_hash.content_idx = ?`
-    sql_pool.query(sql_gettag, [content_id], (err_get, rows_get, result_get) => {
-        if (err_get)
-            console.log(err_get)
-        else
-            res.send(rows_get)
-    })
-})
+    // 콘텐츠 조회
+    const { data: content, error: fetchError } = await supabase
+      .from("content")
+      .select("hashtag")
+      .eq("content_id", content_id);
 
-module.exports = router
+    if (fetchError) throw fetchError;
+
+    if (!content || content.length === 0) {
+      return res.json("fail");
+    }
+
+    // 기존 태그와 새 태그 결합
+    const existingTags = content[0].hashtag
+      ? content[0].hashtag.split(",")
+      : [];
+    if (existingTags.includes(tag_context)) {
+      return res.json("duplication");
+    }
+
+    const updatedTags = [...existingTags, tag_context].join(",");
+
+    // 콘텐츠 업데이트
+    const { error: updateError } = await supabase
+      .from("content")
+      .update({ hashtag: updatedTags })
+      .eq("content_id", content_id);
+
+    if (updateError) throw updateError;
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Tag insert error:", error);
+    res.json("fail");
+  }
+});
+
+// 태그로 콘텐츠 검색
+router.post("/tag_search", async (req, res) => {
+  try {
+    const search_tag = req.body.Hashtag;
+
+    if (!search_tag) {
+      return res.json([]);
+    }
+
+    const { data, error } = await supabase
+      .from("content")
+      .select("*")
+      .ilike("hashtag", `%${search_tag}%`)
+      .order("content_id", { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    console.error("Tag search error:", error);
+    res.status(500).json({ error: "Tag search failed" });
+  }
+});
+
+// 콘텐츠의 모든 태그 조회
+router.post("/get_tags", async (req, res) => {
+  try {
+    const content_id = req.body.content_id;
+
+    const { data, error } = await supabase
+      .from("content")
+      .select("hashtag")
+      .eq("content_id", content_id);
+
+    if (error) throw error;
+
+    if (data && data.length > 0 && data[0].hashtag) {
+      const tags = data[0].hashtag.split(",").map((tag) => ({
+        Hashtag: tag.trim(),
+      }));
+      res.json(tags);
+    } else {
+      res.json([]);
+    }
+  } catch (error) {
+    console.error("Get tags error:", error);
+    res.status(500).json({ error: "Failed to get tags" });
+  }
+});
+
+module.exports = router;

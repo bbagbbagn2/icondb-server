@@ -1,67 +1,159 @@
-const express = require('express')
-const router = express.Router()
-const sql_pool = require('./src/mysql')
+const express = require("express");
+const router = express.Router();
+const supabase = require("./src/supabase");
 
-router.post('/check_followed', (req, res) => {
-    const id = req.session.sign
-    const Follower = req.body.id //팔로우 하는 사람이 Follower로 들어감
+/**
+ * 팔로우 관련 API
+ * Supabase 기반
+ */
 
-    const sql_Followcheck = 'SELECT * FROM Follow WHERE Following = ? AND Follower = ?'
-    sql_pool.query(sql_Followcheck, [Follower, id], (err_Followcheck, result_Followcheck) => {
-        if (result_Followcheck.length > 0)
-            res.send('followed')
-        else
-            res.send('unfollowed')
-    })
-})
+// 팔로우 여부 확인
+router.post("/check_followed", async (req, res) => {
+  try {
+    const current_user = req.session.sign;
+    const target_user = req.body.userId || req.body.id;
 
-router.post('/setFollow', (req, res) => {
-    const id = req.session.sign
-    const Follower = req.body.id
+    const { data, error } = await supabase
+      .from("follows")
+      .select("*")
+      .eq("follower_id", current_user)
+      .eq("following_id", target_user);
 
-    const sql_Followcheck = 'SELECT * FROM Follow WHERE Following = ? AND Follower = ?'
-    sql_pool.query(sql_Followcheck, [Follower, id], (err_Followcheck, result_Followcheck) => {
-        let sql_follow
-        let followed = result_Followcheck.length
+    if (error) throw error;
+    res.json({
+      followed: data && data.length > 0,
+    });
+  } catch (error) {
+    console.error("Check followed error:", error);
+    res.json({ followed: false });
+  }
+});
 
-        if (followed > 0)
-            sql_follow = 'DELETE FROM Follow WHERE Following = ? AND Follower = ?'
-        else
-            sql_follow = 'INSERT INTO Follow (Following, Follower) VALUES(?,?)'
+// 팔로우 토글
+router.post("/setFollow", async (req, res) => {
+  try {
+    const current_user = req.session.sign;
+    const target_user = req.body.id;
 
-        sql_pool.query(sql_follow, [Follower, id], (err, result) => {
-            if (err)
-                console.log(err)
-            else 
-                res.send(!followed) 
-        })
-    })
-})
+    // 이미 팔로우 상태인지 확인
+    const { data: existingFollow, error: checkError } = await supabase
+      .from("follows")
+      .select("*")
+      .eq("follower_id", current_user)
+      .eq("following_id", target_user);
 
-router.post('/get_Following', (req, res) => {
-    const id = req.body.id
+    if (checkError) throw checkError;
 
-    const sql_get = `SELECT user.* FROM Follow INNER JOIN user ON 
-    user.id = Follow.Following WHERE Follower = ?`
-    sql_pool.query(sql_get, [id], (err, rows, result)=> {
-        if(err)
-            console.log(err)
-        else
-            res.send(rows)
-    })
-})
+    const isFollowed = existingFollow && existingFollow.length > 0;
 
-router.post('/get_Follower', (req, res) => {
-    const id = req.body.id
+    if (isFollowed) {
+      // 팔로우 해제
+      const { error: deleteError } = await supabase
+        .from("follows")
+        .delete()
+        .eq("follower_id", current_user)
+        .eq("following_id", target_user);
 
-    const sql_get = `SELECT user.* FROM Follow INNER JOIN user ON 
-    user.id = Follow.Follower WHERE Following = ?`
-    sql_pool.query(sql_get, [id], (err, rows, result)=> {
-        if(err)
-            console.log(err)
-        else
-            res.send(rows)
-    })
-})
+      if (deleteError) throw deleteError;
+      res.json(false);
+    } else {
+      // 팔로우 추가
+      const { error: insertError } = await supabase
+        .from("follows")
+        .insert([{ follower_id: current_user, following_id: target_user }]);
 
-module.exports = router
+      if (insertError) throw insertError;
+      res.json(true);
+    }
+  } catch (error) {
+    console.error("Set follow error:", error);
+    res.status(500).json({ error: "Failed to toggle follow" });
+  }
+});
+
+// 팔로우하는 사람들 조회
+router.post("/get_following", async (req, res) => {
+  try {
+    const user_id = req.body.id;
+
+    const { data, error } = await supabase
+      .from("follows")
+      .select("user(*)")
+      .eq("follower_id", user_id);
+
+    if (error) throw error;
+
+    // user 객체 추출
+    const users = data ? data.map((item) => item.user).filter(Boolean) : [];
+    res.json(users);
+  } catch (error) {
+    console.error("Get following error:", error);
+    res.status(500).json({ error: "Failed to get following" });
+  }
+});
+
+// 팔로워 조회
+router.post("/get_followers", async (req, res) => {
+  try {
+    const user_id = req.body.id;
+
+    const { data, error } = await supabase
+      .from("follows")
+      .select("user(*)")
+      .eq("following_id", user_id);
+
+    if (error) throw error;
+
+    // user 객체 추출
+    const users = data ? data.map((item) => item.user).filter(Boolean) : [];
+    res.json(users);
+  } catch (error) {
+    console.error("Get followers error:", error);
+    res.status(500).json({ error: "Failed to get followers" });
+  }
+});
+
+// 팔로우 상태 확인 (POST /follow)
+router.post("/follow", async (req, res) => {
+  try {
+    const current_user = req.session.sign;
+    const target_user = req.body.userId;
+
+    const { error } = await supabase
+      .from("follows")
+      .insert([{ follower_id: current_user, following_id: target_user }]);
+
+    if (error) {
+      if (error.message.includes("duplicate")) {
+        return res.json({ success: false, message: "Already followed" });
+      }
+      throw error;
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Follow error:", error);
+    res.status(500).json({ error: "Failed to follow" });
+  }
+});
+
+// 언팔로우 (POST /unfollow)
+router.post("/unfollow", async (req, res) => {
+  try {
+    const current_user = req.session.sign;
+    const target_user = req.body.userId;
+
+    const { error } = await supabase
+      .from("follows")
+      .delete()
+      .eq("follower_id", current_user)
+      .eq("following_id", target_user);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Unfollow error:", error);
+    res.status(500).json({ error: "Failed to unfollow" });
+  }
+});
+
+module.exports = router;
